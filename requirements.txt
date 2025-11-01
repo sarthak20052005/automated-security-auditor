@@ -1,0 +1,9 @@
+requests
+beautifulsoup4
+sslyze
+Flask
+jinja2
+fpdf2
+python-whois
+dnspython
+colorama

@@ -1,0 +1,19 @@
+# Python cache and environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.env
+
+# IDE and editor folders
+.vscode/
+.idea/
+
+# Reports and temporary files
+reports/*.html
+reports/*.pdf
+
+# System files
+.DS_Store
+Thumbs.db
