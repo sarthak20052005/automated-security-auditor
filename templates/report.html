@@ -16,21 +16,51 @@
   pre{background:#f4f6f8;padding:12px;border-radius:6px;overflow:auto;font-size:13px}
   .badge{display:inline-block;padding:4px 8px;border-radius:6px;background:#e3f2fd;margin-left:8px;color:#0d47a1}
   ul{margin-top:6px;margin-left:20px;}
+  table.raw-headers, table.cookies-table {width:100%;border-collapse:collapse;margin-top:10px;}
+  table.raw-headers th, table.raw-headers td, table.cookies-table th, table.cookies-table td {border:1px solid #eee;padding:8px 10px;text-align:left;font-size:13px;vertical-align:top;}
+  .muted-small{color:#666;font-size:0.9rem}
+  /* reduce whitespace in extras tables and left-align cells */
+  .extras-table th, .extras-table td{padding:6px 8px;text-align:left;vertical-align:top;}
+  .small-note{font-size:0.9rem;color:#555;margin-top:6px}
 </style>
 </head>
 <body>
   <h1>Security Audit Report for {{ results['general']['url'] }}</h1>
   <div class="summary">
-    <strong>Scan finished:</strong> {{ generated_at }}
-    <span class="score">Header: {{ results['computed']['header_score'] }}% | Cookies: {{ results['computed']['cookie_score'] }}%</span>
-    <span class="badge">Grade: {{ results['computed']['grade'].get('letter','-') }} ({{ results['computed']['grade'].get('numeric','-') }}%)</span>
+    <div><strong>Scan finished:</strong> {{ generated_at }}</div>
+    <div class="mt-1">
+      <span class="score">Header: {{ results['computed']['header_score'] }}%</span>
+      <span class="score">Cookies: {{ results['computed']['cookie_score'] }}%</span>
+      <span class="badge">Grade: {{ results['computed']['grade'].get('letter','-') }} ({{ results['computed']['grade'].get('numeric','-') }}%)</span>
+    </div>
   </div>
 
   <div class="section">
     <h2>General</h2>
     <div><strong>Server:</strong> {{ results['general'].get('server','Unknown') }}</div>
-    <div><strong>sitemap.xml:</strong> {{ results['general'].get('sitemap_xml_found') }}</div>
-    <div><strong>robots.txt:</strong> {{ results['general'].get('robots_txt_found') }}</div>
+
+    {% set robots = results['general'].get('robots_txt') %}
+    {% if robots %}
+      {% if robots.startswith('Error:') %}
+        <div><strong>robots.txt:</strong> <span class="bad">{{ robots }}</span></div>
+      {% else %}
+        <div><strong>robots.txt:</strong> <span class="good">Found</span></div>
+      {% endif %}
+    {% else %}
+      <div><strong>robots.txt:</strong> None</div>
+    {% endif %}
+
+    {% set sitemap = results['general'].get('sitemap_xml') %}
+    {% if sitemap %}
+      {% if sitemap.startswith('Error:') %}
+        <div><strong>sitemap.xml:</strong> <span class="bad">{{ sitemap }}</span></div>
+      {% else %}
+        <div><strong>sitemap.xml:</strong> <span class="good">Found</span></div>
+      {% endif %}
+    {% else %}
+      <div><strong>sitemap.xml:</strong> None</div>
+    {% endif %}
+
     {% if results['general'].get('robots_disallowed_paths') %}
       <p><strong>Disallowed paths (robots):</strong></p>
       <ul>{% for p in results['general']['robots_disallowed_paths'] %}<li><code>{{ p }}</code></li>{% endfor %}</ul>
@@ -39,28 +69,76 @@
 
   <div class="section">
     <h2>HTTP Security Headers</h2>
+
+    <!-- Human-friendly summary -->
     {% if results['headers'].get('missing') %}
-      <p class="bad"><strong>Missing Headers:</strong></p>
-      <ul>{% for h in results['headers']['missing'] %}<li>{{ h }}</li>{% endfor %}</ul>
+      <p class="bad"><strong>Missing Headers:</strong> {{ results['headers']['missing'] | join(', ') }}</p>
     {% else %}
-      <p class="good">All recommended headers present</p>
+      <p class="good">Recommended security headers presence: OK</p>
     {% endif %}
+
     {% if results['headers'].get('csp_weaknesses') %}
       <p class="bad"><strong>CSP Weaknesses:</strong></p><ul>{% for w in results['headers']['csp_weaknesses'] %}<li>{{ w }}</li>{% endfor %}</ul>
     {% endif %}
+
     {% if results['headers'].get('fingerprinting') %}
       <p class="bad"><strong>Information leakage:</strong></p><ul>{% for f in results['headers']['fingerprinting'] %}<li>{{ f }}</li>{% endfor %}</ul>
     {% endif %}
+
+    <!-- Present headers in a clean table (avoid raw JSON brackets) -->
+    <details>
+      <summary class="muted-small">Show parsed response headers</summary>
+      {% if results['computed']['headers_display'] %}
+        <table class="raw-headers" aria-describedby="raw-headers">
+          <thead><tr><th>Header</th><th>Value</th></tr></thead>
+          <tbody>
+            {% for k, v in results['computed']['headers_display'] %}
+              <tr><td>{{ k }}</td><td><code>{{ v }}</code></td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted-small">No headers captured.</div>
+      {% endif %}
+    </details>
   </div>
 
   <div class="section">
     <h2>Cookie Security</h2>
-    {% if results['cookies'].get('insecure_cookies') %}
+
+    {% set insecure = results['cookies'].get('insecure_cookies') or [] %}
+    {% set cookies_count = results['computed'].get('cookies_count', 0) %}
+    {% if insecure %}
       <p class="bad"><strong>Insecure Cookies:</strong></p>
-      <ul>{% for c in results['cookies']['insecure_cookies'] %}<li>{{ c }}</li>{% endfor %}</ul>
+      <ul>{% for c in insecure %}<li>{{ c }}</li>{% endfor %}</ul>
     {% else %}
-      <p class="good">All cookies appear secure (Secure + HttpOnly flags present).</p>
+      <p class="good">Cookies basic checks: OK</p>
     {% endif %}
+
+    <div class="small-note">Cookies found: {{ cookies_count }}</div>
+
+    <!-- Cookie details table -->
+    <details>
+      <summary class="muted-small">Show cookie details</summary>
+      {% if cookies_count > 0 %}
+        <table class="cookies-table" aria-describedby="cookies-table">
+          <thead><tr><th>Name</th><th>Value (truncated)</th><th style="width:80px">Secure</th><th style="width:80px">HttpOnly</th><th style="width:120px">SameSite</th></tr></thead>
+          <tbody>
+            {% for c in results['computed']['cookies_raw'] %}
+              <tr>
+                <td>{{ c.name }}</td>
+                <td><code>{{ c.value[:60] }}{% if c.value|length > 60 %}...{% endif %}</code></td>
+                <td>{{ 'Yes' if c.secure else 'No' }}</td>
+                <td>{{ 'Yes' if c.httponly else 'No' }}</td>
+                <td>{{ c.samesite or '—' }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="muted-small">No cookies captured.</div>
+      {% endif %}
+    </details>
   </div>
 
   <div class="section">
@@ -92,8 +170,15 @@ Expires: {{ results['computed']['ssl_cert_display']['not_valid_after'] }} {% if 
   <div class="section">
     <h2>Basic Vulnerabilities</h2>
     <div><strong>Reflected XSS:</strong>
-      {% if results['vulnerabilities'].get('reflected_xss',{}).get('vulnerable') %}<span class="bad">Potentially Vulnerable</span>{% else %}<span class="good">Not Detected</span>{% endif %}
-      {% if results['vulnerabilities'].get('reflected_xss',{}).get('tested_url') %}<div class="neutral">Tested URL: <code>{{ results['vulnerabilities']['reflected_xss']['tested_url'] }}</code></div>{% endif %}
+      {% if results['vulnerabilities'].get('reflected_xss',{}) or results['vulnerabilities'].get('xss',{}) %}
+        {% set rx = results['vulnerabilities'].get('reflected_xss',{}) %}
+        {% set rx2 = results['vulnerabilities'].get('xss',{}) %}
+        {% set vulnerable = rx.get('vulnerable') or rx2.get('vulnerable') %}
+        {% if vulnerable %}<span class="bad">Potentially Vulnerable</span>{% else %}<span class="good">Not Detected</span>{% endif %}
+        {% if rx.get('tested_url') %}<div class="neutral">Tested URL: <code>{{ rx['tested_url'] }}</code></div>{% elif rx2.get('tested_url') %}<div class="neutral">Tested URL: <code>{{ rx2['tested_url'] }}</code></div>{% endif %}
+      {% else %}
+        <span class="neutral">Not tested</span>
+      {% endif %}
     </div>
 
     <div><strong>Clickjacking:</strong>
@@ -115,21 +200,62 @@ Expires: {{ results['computed']['ssl_cert_display']['not_valid_after'] }} {% if 
 
   <div class="section">
     <h2>Extras (WHOIS / DNS / Ports)</h2>
+    {% set ed = results['computed']['extras_display'] %}
     {% if results['extras'].get('skipped') %}
       <p class="neutral">Extras were skipped (optional modules not installed).</p>
     {% else %}
-      {% if results['extras'].get('dns') %}
-        <div><strong>DNS:</strong></div>
-        <pre>{{ results['extras']['dns'] | tojson(indent=2) }}</pre>
-      {% endif %}
-      {% if results['extras'].get('ports') %}
-        <div><strong>Top ports:</strong></div>
-        <pre>{{ results['extras']['ports'] | tojson(indent=2) }}</pre>
-      {% endif %}
-      {% if results['extras'].get('whois') %}
-        <div><strong>Whois:</strong></div>
-        <pre>{{ results['extras']['whois'] | tojson(indent=2) }}</pre>
-      {% endif %}
+      <div>
+        <strong>DNS:</strong>
+        {% if ed.resolved_ip %}
+          <div>Resolved IP: <code>{{ ed.resolved_ip }}</code></div>
+        {% elif ed.resolved_ip_error %}
+          <div class="bad">DNS resolution error: <code>{{ ed.resolved_ip_error }}</code></div>
+        {% else %}
+          <div class="muted-small">No DNS information available.</div>
+        {% endif %}
+        {% if ed.mx %}
+          <div style="margin-top:6px;"><strong>MX records:</strong></div>
+          <ul>{% for m in ed.mx %}<li><code>{{ m }}</code></li>{% endfor %}</ul>
+        {% endif %}
+      </div>
+
+      <div style="margin-top:12px;">
+        <strong>Top ports scan:</strong>
+        {% if ed.ports %}
+          <div class="muted-small">Open ports: {{ ed.open_ports_count }}</div>
+          <table class="cookies-table" style="margin-top:6px;">
+            <thead><tr><th>Port</th><th>Status</th></tr></thead>
+            <tbody>
+              {% for p in ed.ports %}
+                <tr>
+                  <td>{{ p.port }}</td>
+                  <td>{% if p.open %}<span class="good">Open</span>{% else %}<span class="neutral">Closed</span>{% endif %}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-small">No port scan results available.</div>
+        {% endif %}
+      </div>
+
+      <div style="margin-top:12px;">
+        <strong>Whois:</strong>
+        {% if ed.whois_error %}
+          <div class="bad">Whois error: <code>{{ ed.whois_error }}</code></div>
+        {% elif ed.whois_summary %}
+          <table class="cookies-table" style="margin-top:6px;">
+            <thead><tr><th>Field</th><th>Value</th></tr></thead>
+            <tbody>
+              {% for k, v in ed.whois_summary.items() %}
+                <tr><td>{{ k.replace('_',' ').title() }}</td><td><code>{{ v }}</code></td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="muted-small">No whois information available.</div>
+        {% endif %}
+      </div>
     {% endif %}
   </div>
 </body>

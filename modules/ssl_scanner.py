@@ -1,11 +1,14 @@
 # modules/ssl_scanner.py
 import warnings
+# keep deprecation warnings muted only for this module's scope if necessary
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import socket
 import ssl
 import datetime
 from typing import Dict, Any, Optional
+import logging
+from time import sleep
 
 # sslyze imports
 from sslyze import (
@@ -16,6 +19,8 @@ from sslyze import (
     ServerNetworkConfiguration,
     ServerScanStatusEnum
 )
+
+logger = logging.getLogger(__name__)
 
 def _parse_peercert_dict(cert_dict):
     if not cert_dict:
@@ -35,8 +40,8 @@ def _parse_peercert_dict(cert_dict):
 
 def _fallback_tls_check(hostname: str, port: int = 443, timeout: int = 6):
     """
-    Fallback TLS handshake using python ssl to determine negotiated TLS version
-    and retrieve peer certificate if sslyze fails or is blocked.
+    Probe individual TLS versions explicitly to detect support reliably.
+    Returns booleans for tls_1_0..tls_1_3 and best-effort certificate details.
     """
     results = {
         "tls_1_0": False,
@@ -46,13 +51,52 @@ def _fallback_tls_check(hostname: str, port: int = 443, timeout: int = 6):
         "certificate_details": {}
     }
 
+    # If TLSVersion enum is available, probe per-version by restricting context
     try:
-        ctx = ssl.create_default_context()
-        with socket.create_connection((hostname, port), timeout=timeout) as sock:
-            with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
-                ver = ssock.version()
-                cert = ssock.getpeercert()
-                if ver:
+        TLSVersion = ssl.TLSVersion
+        probes = [
+            ("tls_1_0", TLSVersion.TLSv1),
+            ("tls_1_1", TLSVersion.TLSv1_1),
+            ("tls_1_2", TLSVersion.TLSv1_2),
+        ]
+        try:
+            probes.append(("tls_1_3", TLSVersion.TLSv1_3))
+        except Exception:
+            pass
+
+        for name, tv in probes:
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                # restrict to single version
+                ctx.minimum_version = tv
+                ctx.maximum_version = tv
+
+                with socket.create_connection((hostname, port), timeout=timeout) as sock:
+                    with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+                        # handshake succeeded for this version
+                        results[name] = True
+                        if not results["certificate_details"]:
+                            try:
+                                cert = ssock.getpeercert()
+                                results["certificate_details"] = _parse_peercert_dict(cert)
+                            except Exception:
+                                pass
+            except Exception:
+                # handshake failed for this version
+                continue
+        return results
+    except Exception:
+        # Fallback: do a default handshake and infer negotiated version
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((hostname, port), timeout=timeout) as sock:
+                with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+                    ver = (ssock.version() or "").lower()
+                    cert = ssock.getpeercert()
                     if "1.0" in ver:
                         results["tls_1_0"] = True
                     if "1.1" in ver:
@@ -61,14 +105,16 @@ def _fallback_tls_check(hostname: str, port: int = 443, timeout: int = 6):
                         results["tls_1_2"] = True
                     if "1.3" in ver:
                         results["tls_1_3"] = True
-                results["certificate_details"] = _parse_peercert_dict(cert)
-    except Exception:
-        # best-effort only
-        pass
+                    results["certificate_details"] = _parse_peercert_dict(cert)
+        except Exception:
+            pass
+        return results
 
-    return results
-
-def scan_ssl(hostname: str) -> Dict[str, Any]:
+def scan_ssl(hostname: str, port: int = 443) -> Dict[str, Any]:
+    """
+    Scan SSL/TLS configuration using sslyze with a fallback handshake.
+    port is configurable. Returns structured results and error messages.
+    """
     results: Dict[str, Any] = {
         "supports_sslv2": False,
         "supports_sslv3": False,
@@ -83,16 +129,25 @@ def scan_ssl(hostname: str) -> Dict[str, Any]:
         "error": None,
     }
 
-    try:
-        ip_address = socket.gethostbyname(hostname)
-    except Exception as e:
-        results["error"] = f"DNS resolution failed: {e}"
+    # DNS resolution with a small retry/backoff
+    ip_address = None
+    for attempt in range(2):
+        try:
+            ip_address = socket.gethostbyname(hostname)
+            break
+        except Exception as e:
+            logger.debug("DNS resolution attempt %d failed for %s: %s", attempt + 1, hostname, e)
+            if attempt == 0:
+                sleep(0.2)
+            last_dns_err = e
+    if not ip_address:
+        results["error"] = f"DNS resolution failed: {last_dns_err}"
         return results
 
-    print(f"[*] Scanning {hostname} -> {ip_address}:443 (SNI={hostname})")
+    logger.info("Scanning %s -> %s:%d (SNI=%s)", hostname, ip_address, port, hostname)
 
     try:
-        server_location = ServerNetworkLocation(ip_address, 443)
+        server_location = ServerNetworkLocation(ip_address, port)
         network_config = ServerNetworkConfiguration(
             tls_server_name_indication=hostname,
             network_timeout=30,
@@ -180,7 +235,7 @@ def scan_ssl(hostname: str) -> Dict[str, Any]:
 
         # fallback: if TLS not detected by sslyze, try python ssl handshake
         if not (results.get("supports_tls_1_2") or results.get("supports_tls_1_3")):
-            fb = _fallback_tls_check(hostname)
+            fb = _fallback_tls_check(hostname, port=port)
             results["supports_tls_1_0"] = results["supports_tls_1_0"] or fb.get("tls_1_0", False)
             results["supports_tls_1_1"] = results["supports_tls_1_1"] or fb.get("tls_1_1", False)
             results["supports_tls_1_2"] = results["supports_tls_1_2"] or fb.get("tls_1_2", False)
@@ -190,14 +245,21 @@ def scan_ssl(hostname: str) -> Dict[str, Any]:
 
     except Exception as e:
         results["error"] = str(e)
+        logger.exception("ssl scan failed for %s:%d", hostname, port)
 
     # Add certificate expiry flag if possible
     try:
         na = results.get("certificate_details", {}).get("not_valid_after")
         if na:
-            try:
-                dt = datetime.datetime.strptime(na, "%b %d %H:%M:%S %Y %Z")
-            except Exception:
+            dt = None
+            # Try common formats
+            for fmt in ("%b %d %H:%M:%S %Y %Z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt = datetime.datetime.strptime(na, fmt)
+                    break
+                except Exception:
+                    continue
+            if not dt:
                 try:
                     dt = datetime.datetime.fromisoformat(na)
                 except Exception:
@@ -211,4 +273,6 @@ def scan_ssl(hostname: str) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import json
+    # keep direct run minimal and use logging instead of print
+    logging.basicConfig(level=logging.INFO)
     print(json.dumps(scan_ssl("example.com"), indent=2))

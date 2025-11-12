@@ -9,32 +9,32 @@ from modules.vuln_scanner import check_basic_xss, check_clickjacking, check_cors
 from modules.reporting import generate_html_report
 
 def compute_overall_grade(scan_results):
-    """
-    Simple aggregate scoring:
-    - Header score (0-100)
-    - Cookie score (0-100)
-    - TLS score: 50 for TLS1.2+, 0 otherwise
-    - Vuln penalty: -20 if any critical vuln found
-    Returns letter grade A-F and numeric.
-    """
-    header_score = scan_results.get('headers', {}).get('score', 0)
-    cookie_score = scan_results.get('cookies', {}).get('score', 100)
-    ssl = scan_results.get('ssl', {})
-    tls_good = 1 if (ssl.get('supports_tls_1_2') or ssl.get('supports_tls_1_3')) else 0
-    tls_score = 50 if tls_good else 0
+    header_score = scan_results.get('headers', {}).get('score', 0) or 0
+    cookie_score = scan_results.get('cookies', {}).get('score', 100) or 100
+    ssl = scan_results.get('ssl', {}) or {}
+    tls_good = bool(ssl.get('supports_tls_1_2') or ssl.get('supports_tls_1_3'))
+    tls_component = 100 if tls_good else 0
 
-    vuln = scan_results.get('vulnerabilities', {})
     penalty = 0
-    # penalize for reflected XSS or clickjacking vulnerabilities
-    if vuln.get('reflected_xss', {}).get('vulnerable'):
+    vuln = scan_results.get('vulnerabilities', {}) or {}
+    if vuln.get('reflected_xss', {}).get('vulnerable') or vuln.get('xss', {}).get('vulnerable'):
         penalty += 30
     if vuln.get('clickjacking', {}).get('vulnerable'):
         penalty += 20
     if vuln.get('cors', {}).get('issue'):
-        penalty += 10
+        penalty += 8
 
-    total = int((header_score * 0.3) + (cookie_score * 0.2) + (tls_score * 0.4) - penalty)
+    csp_weak = scan_results.get('headers', {}).get('csp_weaknesses') or []
+    penalty += 4 * len(csp_weak)
+
+    insecure = scan_results.get('cookies', {}).get('insecure_cookies') or []
+    penalty += min(15, len(insecure) * 3)
+
+    total = int((header_score * 0.4) + (cookie_score * 0.2) + (tls_component * 0.4) - penalty)
     total = max(0, min(100, total))
+
+    if header_score >= 80 and penalty <= 10:
+        total = min(100, total + 8)
 
     if total >= 90:
         letter = "A+"
@@ -49,7 +49,7 @@ def compute_overall_grade(scan_results):
     else:
         letter = "F"
 
-    return {"numeric": total, "letter": letter}
+    return {'numeric': total, 'letter': letter}
 
 def main():
     parser = argparse.ArgumentParser(description="Automated Security Auditing Tool")
@@ -80,15 +80,41 @@ def main():
     print("[1/6] Performing core reconnaissance...")
     core_info = get_target_info(args.url)
     if core_info.get('error'):
-        print(f"[!] Critical error fetching target: {core_info['error']}")
+        err = core_info.get('error')
+        print(f"[!] Critical error fetching target: {err}")
+        # Populate minimal results so HTML report shows the failure
+        scan_results['general'] = {
+            'url': args.url,
+            'server': core_info.get('server_tech', 'Unknown'),
+            'robots_txt_found': f"Fatal Error: {err}",
+            'robots_disallowed_paths': [],
+            'sitemap_xml_found': f"Fatal Error: {err}"
+        }
+
+        # keep other sections empty/flagged so the report renders
+        scan_results['headers'] = scan_results.get('headers', {})
+        scan_results['cookies'] = scan_results.get('cookies', {})
+        scan_results['vulnerabilities'] = scan_results.get('vulnerabilities', {})
+        scan_results['extras'] = {'error': err}
+
+        # finish meta and force failing grade
+        scan_results['meta']['finished_at'] = datetime.datetime.utcnow().isoformat() + "Z"
+        scan_results['meta']['overall_grade'] = {'numeric': 0, 'letter': 'F'}
+
+        # generate a partial report showing the error, then exit
+        try:
+            generate_html_report(scan_results, args.output)
+            print(f"[!] Generated partial report to {args.output} due to error")
+        except Exception as e:
+            print(f"[!] Failed to write partial report: {e}")
         return
 
     scan_results['general'] = {
         'url': args.url,
         'server': core_info.get('server_tech', 'Unknown'),
-        'robots_txt_found': 'Found' if core_info.get('robots_txt') else 'Not Found',
+        'robots_txt': core_info.get('robots_txt'),
         'robots_disallowed_paths': parse_robots_txt(core_info.get('robots_txt')),
-        'sitemap_xml_found': 'Found' if core_info.get('sitemap_xml') else 'Not Found'
+        'sitemap_xml': core_info.get('sitemap_xml')
     }
 
     # 2. Headers & Cookies

@@ -77,63 +77,94 @@ def analyze_csp(csp_value):
 
 def analyze_cookies(cookies):
     """
-    Analyzes cookies for Secure and HttpOnly attributes and returns a dict.
-    Accepts a requests.cookies.RequestsCookieJar or list of cookies.
+    Analyzes cookies for Secure and HttpOnly attributes and returns a dict:
+      - insecure_cookies: human-readable list of warnings
+      - score: 0-100 (forgiving; missing Secure/HttpOnly reduce score but not to 0)
+      - cookies: normalized list of cookie dicts for reporting
+    Accepts a requests.cookies.RequestsCookieJar, list of cookie objects or dict.
     """
     results = {
         'insecure_cookies': [],
-        'score': 100
+        'score': 100,
+        'cookies': []
     }
 
     if not cookies:
         return results
 
-    insecure_count = 0
     total = 0
+    total_penalty = 0
 
     for cookie in cookies:
         total += 1
-        is_insecure = False
-        reasons = []
-        # cookie is a requests.cookies.Cookie object typically
+        # normalize cookie representation
+        name = ''
+        value = ''
+        secure_flag = False
+        httponly_flag = False
+        samesite = ''
+
         try:
-            if not getattr(cookie, "secure", False):
-                is_insecure = True
-                reasons.append('Missing "Secure" flag')
+            if isinstance(cookie, dict):
+                name = cookie.get('name') or cookie.get('Name') or list(cookie.keys())[0] if cookie else ''
+                value = cookie.get('value') or cookie.get('Value') or ''
+                secure_flag = bool(cookie.get('secure') or cookie.get('Secure'))
+                httponly_flag = bool(cookie.get('httponly') or cookie.get('HttpOnly') or cookie.get('httpOnly'))
+                samesite = cookie.get('samesite') or cookie.get('SameSite') or ''
+            else:
+                name = getattr(cookie, 'name', '') or getattr(cookie, 'key', '') or str(cookie)
+                value = getattr(cookie, 'value', '') or getattr(cookie, 'val', '') or ''
+                secure_flag = bool(getattr(cookie, 'secure', False))
+                # HttpOnly often in _rest or rest dicts
+                rest = getattr(cookie, '_rest', None) or getattr(cookie, 'rest', None) or {}
+                has_httponly = False
+                if isinstance(rest, dict):
+                    for k in rest.keys():
+                        if str(k).lower() == 'httponly':
+                            has_httponly = True
+                            break
+                if not has_httponly and hasattr(cookie, 'has_nonstandard_attr'):
+                    try:
+                        has_httponly = bool(cookie.has_nonstandard_attr('httponly'))
+                    except Exception:
+                        pass
+                httponly_flag = has_httponly
+                samesite = rest.get('samesite') if isinstance(rest, dict) else ''
+
         except Exception:
-            pass
+            # best-effort fallback
+            name = getattr(cookie, 'name', '') or str(cookie)
+            value = ''
+            secure_flag = False
+            httponly_flag = False
 
-        # HttpOnly can be stored in cookie._rest or cookie._rest.get('HttpOnly')
-        try:
-            rest = getattr(cookie, "_rest", {})
-            has_httponly = False
-            # keys may vary in case; check case-insensitively
-            if isinstance(rest, dict):
-                for k in rest.keys():
-                    if str(k).lower() == "httponly":
-                        has_httponly = True
-                        break
-            # if cookie object has attribute 'httponly' check that too
-            if not has_httponly and hasattr(cookie, "has_nonstandard_attr"):
-                try:
-                    has_httponly = cookie.has_nonstandard_attr("httponly")
-                except Exception:
-                    pass
+        # build normalized cookie entry for templates
+        normalized = {
+            'name': name or '',
+            'value': value or '',
+            'secure': bool(secure_flag),
+            'httponly': bool(httponly_flag),
+            'samesite': samesite or ''
+        }
+        results['cookies'].append(normalized)
 
-            if not has_httponly:
-                is_insecure = True
-                reasons.append('Missing "HttpOnly" flag')
-        except Exception:
-            # conservative approach: mark insecure if we cannot confirm
-            is_insecure = True
-            reasons.append('Missing "HttpOnly" flag (could not verify)')
+        # Determine penalties (forgiving): Secure missing -> -10, HttpOnly missing -> -8
+        cookie_warnings = []
+        penalty = 0
+        if not normalized['secure']:
+            cookie_warnings.append('Missing "Secure" flag')
+            penalty += 10
+        if not normalized['httponly']:
+            cookie_warnings.append('Missing "HttpOnly" flag')
+            penalty += 8
 
-        if is_insecure:
-            insecure_count += 1
-            results['insecure_cookies'].append(f"Cookie '{getattr(cookie, 'name', str(cookie))}' is insecure: {', '.join(reasons)}")
+        if cookie_warnings:
+            results['insecure_cookies'].append(f"Cookie '{normalized['name']}' warnings: {', '.join(cookie_warnings)}")
+            total_penalty += penalty
 
-    # Score: percent of cookies that are secure
-    if total > 0:
-        results['score'] = int(((total - insecure_count) / total) * 100)
+    # Convert penalties to score; cap penalty to avoid 0 and ensure a minimum baseline (40%)
+    total_penalty = min(total_penalty, 60)  # cap overall cookie penalty
+    score = max(40, 100 - int(total_penalty))
+    results['score'] = score
 
     return results
