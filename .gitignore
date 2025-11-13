@@ -12,7 +12,7 @@ venv/
 
 # Reports and temporary files
 reports/*.html
-reports/*.pdf
+reports/*.json
 
 # System files
 .DS_Store
